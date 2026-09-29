@@ -1,0 +1,729 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>智能 PDF 分类合并 V29</title>
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f4f5f7;margin:0;color:#111}header{background:#111;color:#fff;padding:18px 20px}
+main{max-width:1180px;margin:auto;padding:15px}.card{background:#fff;border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 2px 10px #0000000c}
+.drop{border:2px dashed #999;border-radius:12px;padding:30px;text-align:center;cursor:pointer}.muted{color:#777;font-size:13px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button{border:0;border-radius:9px;padding:10px 13px;background:#111;color:#fff;font-weight:700}
+button.alt{background:#eee;color:#111}input,select{padding:8px;border:1px solid #ccc;border-radius:8px}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}td input{width:150px;box-sizing:border-box}.scroll{overflow:auto}.warn{background:#fff7d6}.listing{background:#eef7ff}.dup{background:#ffe8e8}.good{color:#16794b}.bad{color:#b42318}.previewGroup{border-left:4px solid #ddd;padding:8px 12px;margin:8px 0}.previewItem{padding:4px 0;font-size:13px}.summaryGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}.summaryCard{border:1px solid #ddd;border-radius:10px;padding:12px}.summaryCard b{display:block;margin-bottom:5px}.filterLabel{display:flex;align-items:center;gap:6px;border:1px solid #ddd;border-radius:8px;padding:7px 9px}
+.company{display:flex;gap:6px;align-items:center;border:1px solid #ddd;border-radius:8px;padding:7px 9px}.pill{font-size:11px;padding:3px 6px;border-radius:20px;background:#eee}
+@media(max-width:700px){table{min-width:1050px}.drop{padding:22px 8px}}
+</style></head><body>
+<header><b>智能 PDF 分类合并 V29</b><div class="muted" style="color:#bbb">公司 → 月份 → ATTN 金额汇报 · 读取完成后自动核对版</div></header>
+<main>
+<div class="card"><div class="drop" id="drop"><b>选择或拖入全部 PDF</b><br><span class="muted">系统读取 PDF 里面的公司、ATTN、Invoice No.、日期及 Listing，不依赖文件名分类</span></div>
+<input id="files" type="file" accept="application/pdf" multiple hidden><div id="status" style="margin-top:10px"></div></div>
+<div class="card"><b>选择要合并的公司</b><div id="companies" class="controls" style="margin-top:10px"></div>
+<div class="controls" style="margin-top:10px"><button class="alt" id="all">全选</button><button class="alt" id="none">取消全选</button></div></div>
+<div class="card">
+ <b>月份筛选</b>
+ <div id="months" class="controls" style="margin-top:10px"></div>
+ <div class="controls" style="margin-top:10px"><button class="alt" id="allMonths">全选月份</button><button class="alt" id="noneMonths">取消月份</button></div>
+ <p class="muted">月份按 Invoice 日期识别；Listing 会跟随所属公司的所选月份参与核对与合并。</p>
+</div>
+<div class="card">
+ <div class="controls"><b>公司月度 ATTN 金额汇报</b><button class="alt" id="copyMonthlyReport">复制 WhatsApp</button></div>
+ <div id="monthlyReport" style="margin-top:12px"></div>
+ <p class="muted">格式：月份 → ATTN → 金额 → 合计。金额按该 ATTN 当月 Invoice Total Payable 自动相加。</p>
+</div>
+<div class="card">
+ <b>⚠️ 自动检查发现问题</b>
+ <div id="companySummary" class="summaryGrid" style="margin-top:10px"></div>
+</div>
+<div class="card scroll"><table><thead><tr><th>#</th><th>识别类型</th><th>客户编号</th><th>公司</th><th>ATTN</th><th>日期</th><th>Invoice No.</th><th>金额</th><th>页数</th><th>原文件</th><th>状态</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="card" id="auditCard">
+ <b>自动检查</b>
+ <div id="audit" style="margin-top:10px" class="muted">上传 PDF 后自动检查重复 Invoice 和 Listing 对照。</div>
+</div>
+<div class="card">
+ <div class="controls"><b>最终合并顺序预览</b><button class="alt" id="refreshPreview">刷新预览</button></div>
+ <div id="preview" style="margin-top:10px"></div>
+</div>
+<div class="card"><button id="merge">智能排序并合并成 1 个 PDF</button>
+<p class="muted">规则：每家公司先放 Invoice；Invoice 按 ATTN 分组、组内日期旧→新；该公司的 Statement/Listing 固定放在该公司最后。没有 ATTN 时自动使用公司名称。</p></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const $=q=>document.querySelector(q), F=$("#files"); let docs=[],seq=0,selected=new Set(),selectedMonths=new Set(),isLoading=false,loadTotal=0,loadDone=0;
+$("#drop").onclick=()=>F.click(); $("#drop").ondragover=e=>e.preventDefault(); $("#drop").ondrop=e=>{e.preventDefault();load([...e.dataTransfer.files].filter(x=>x.type==="application/pdf"))};F.onchange=()=>load([...F.files]);
+const clean=s=>(s||"").replace(/\s+/g," ").trim();
+function dateISO(s){let m=s.match(/\b([0-3]?\d)[\/.-]([01]?\d)[\/.-](20\d\d)\b/);return m?`${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`:""}
+function invoiceNo(s){
+ let patterns=[
+   /\bIV\d{4,}(?:-\d{2,})?\b/i,
+   /\bINV[- ]?\d{3,}[A-Z0-9-]*\b/i
+ ];
+ for(const p of patterns){let m=s.match(p);if(m)return m[0].replace(/\s+/g,"").toUpperCase()}
+ return "";
+}
+
+function listingInvoiceRefs(text){
+ if(!/CUSTOMER\s+INVOICE\s+LISTING/i.test(text) && !/STATEMENT\s*LISTING/i.test(text)) return [];
+ // SQL Account invoice IDs such as IV2609-0001. Global scan is intentional for listing rows.
+ let refs = text.match(/\bIV\d{4,}-\d{3,}\b/gi) || [];
+ return [...new Set(refs.map(x=>x.toUpperCase()))];
+}
+
+function typeOf(s){let u=s.toUpperCase();
+ return /(CUSTOMER\s+INVOICE\s+LISTING|STATEMENT\s*LISTING|STATEMENT\s+LISTING|\bSTATEMENT\b)/.test(u)?"LISTING":
+ /\bINVOICE\b/.test(u)?"INVOICE":"OTHER"}
+function attnOf(lines,text){
+ // Prefer isolated value immediately after "Attn:" because SQL Account extraction often separates label/value.
+ for(let i=0;i<lines.length;i++){
+   if(/^Attn\s*:\s*$/i.test(lines[i]) && lines[i+1] && !/^Attn/i.test(lines[i+1])) return clean(lines[i+1]);
+ }
+ let vals=[...text.matchAll(/Attn\s*:\s*([^\n\r]{1,80})/gi)].map(m=>clean(m[1])).filter(Boolean);
+ if(vals.length)return vals[0].replace(/\s+Attn\s*:.*$/i,"");
+ return "";
+}
+function accountOf(text){
+ let m=text.match(/\b300-[A-Z0-9]{4,}\b/i);
+ return m?m[0].toUpperCase():"";
+}
+function normalizeCompanyName(name){
+ name=clean(name);
+ // Normalize spacing/punctuation without deleting legal registration identifiers.
+ name=name.replace(/\s*\.\s*/g,". ").replace(/\s+/g," ").trim();
+ name=name.replace(/SDN\.\s*BHD\b/i,"SDN. BHD");
+ return name;
+}
+function companyOf(lines,text,type){
+ // Billing customer is before Sales Executive/Customer Account section; ignore our own FRESH HARVEST header/footer.
+ let stop=lines.findIndex(x=>/Sales Executive|Customer Account|Invoice No\.?/i.test(x)); if(stop<0)stop=Math.min(lines.length,40);
+ let head=lines.slice(0,stop).filter(x=>!/FRESH HARVEST/i.test(x));
+ let legal=head.find(x=>/(SDN\.?\s*BHD|CONSORTIUM|ENTERPRISE|TRADING|CONSTRUCTION|WORKSHOP|BAKERY|TECH|MOBILE)/i.test(x));
+ if(legal)return normalizeCompanyName(legal);
+ // Listing may have company wording elsewhere.
+ let anyIdx=lines.findIndex(x=>!/FRESH HARVEST/i.test(x)&&/(SDN\.?\s*BHD|CONSORTIUM|ENTERPRISE|TRADING|CONSTRUCTION|WORKSHOP|BAKERY|TECH|MOBILE)/i.test(x));
+ if(anyIdx>=0){
+   let nm=lines[anyIdx];
+   // SQL listing can wrap the registration number onto the next line.
+   if(lines[anyIdx+1] && /^\([A-Z0-9-]+\)$/i.test(lines[anyIdx+1])) nm+=" "+lines[anyIdx+1];
+   return normalizeCompanyName(nm);
+ }
+ return "";
+}
+
+function moneyNumber(x){
+ if(!x)return null;
+ let n=parseFloat(String(x).replace(/,/g,""));
+ return Number.isFinite(n)?n:null;
+}
+function invoiceTotalOf(text){
+ // SQL Account Invoice: use Total Payable, normally followed by the amount.
+ let m=text.match(/Total\s+Payable[\s\S]{0,120}?(\d{1,3}(?:,\d{3})*\.\d{2})/i);
+ if(m)return moneyNumber(m[1]);
+ // PDF extraction may place amount before/after labels unpredictably; use the final currency amount
+ // near payment terms / signature area as fallback.
+ let tail=text.slice(Math.max(0,text.search(/RINGGIT MALAYSIA/i)));
+ let vals=[...tail.matchAll(/\b\d{1,3}(?:,\d{3})*\.\d{2}\b/g)].map(x=>moneyNumber(x[0])).filter(x=>x!==null);
+ return vals.length?Math.max(...vals):null;
+}
+function listingRowsOf(text){
+ // Capture each SQL Account listing row: Invoice No, date, customer code, company text, amount.
+ let rows=[];
+ let re=/\b(IV\d{4,}-\d{3,})\s+(\d{2}\/\d{2}\/\d{4})\s+(300-[A-Z0-9]+)\s+([\s\S]*?)\s+(\d{1,3}(?:,\d{3})*\.\d{2})(?=\s+(?:IV\d{4,}-\d{3,}|Grand\s+Total|Code\s+Description)|$)/gi,m;
+ while((m=re.exec(text))!==null){
+   rows.push({inv:m[1].toUpperCase(),date:m[2],account:m[3].toUpperCase(),amount:moneyNumber(m[5])});
+ }
+ // Robust fallback: pair invoice refs with nearby/ordered amounts from listing section.
+ if(!rows.length){
+   let refs=listingInvoiceRefs(text);
+   let section=(text.split(/Doc\.\s*No\s+Doc\.\s*Date/i)[1]||text).split(/Grand\s+Total/i)[0];
+   let amounts=[...section.matchAll(/\b\d{1,3}(?:,\d{3})*\.\d{2}\b/g)].map(x=>moneyNumber(x[0]));
+   refs.forEach((inv,i)=>rows.push({inv,amount:amounts[i]??null}));
+ }
+ return rows;
+}
+function listingGrandTotalOf(text, rows=[]){
+ // SQL Account PDFs may split "Grand Total", "Amount (MYR)" and the value into separate text items.
+ let patterns=[
+   /Grand\s+Total[\s\S]{0,160}?Amount\s*\(MYR\)[\s\S]{0,80}?(\d{1,3}(?:,\d{3})*\.\d{2})/i,
+   /Grand\s+Total[\s\S]{0,120}?(\d{1,3}(?:,\d{3})*\.\d{2})/i
+ ];
+ for(const p of patterns){let m=text.match(p);if(m)return moneyNumber(m[1])}
+ // If every Listing row has an amount, their sum is the Listing total.
+ let vals=(rows||[]).map(r=>r.amount).filter(x=>x!=null);
+ return vals.length && vals.length===(rows||[]).length ? vals.reduce((a,b)=>a+b,0) : null;
+}
+function rm(n){return n==null?"-":"RM"+n.toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2})}
+
+async function readPdf(file){
+ let ab=await file.arrayBuffer(),
+     pdf=await pdfjsLib.getDocument({data:ab.slice(0)}).promise,
+     text="",lines=[],posItems=[];
+ for(let p=1;p<=Math.min(pdf.numPages,3);p++){
+   let pg=await pdf.getPage(p),c=await pg.getTextContent();
+   let pageLines=c.items.map(i=>clean(i.str)).filter(Boolean);
+   lines.push(...pageLines);
+   text+=(text?"\n":"")+pageLines.join("\n");
+   c.items.forEach(i=>{
+     let v=clean(i.str);
+     if(v)posItems.push({text:v,x:i.transform?i.transform[4]:0,y:i.transform?i.transform[5]:0,page:p});
+   });
+ }
+ let type=typeOf(text), company=companyOf(lines,text,type),attn=attnOf(lines,text),date=dateISO(text),
+     inv=(type==="INVOICE"?invoiceNo(text):""),account=accountOf(text),
+     amount=(type==="INVOICE"?invoiceTotalOf(text):null),
+     listingRows=(type==="LISTING"?listingRowsOf(text):[]);
+ let listingGrandTotal=(type==="LISTING"?listingGrandTotalOf(text,listingRows):null);
+ if(!attn || /^Attn\s*:?$/i.test(attn) || /FRESH HARVEST/i.test(attn)) attn=company;
+ let invoiceRefs = type==="LISTING"
+   ? listingInvoiceRefs(text)
+   : [...new Set([
+       ...(text.match(/\bIV\d{4,}-\d{3,}\b/gi)||[]),
+       ...(text.match(/\bINV[- ]?\d{3,}[A-Z0-9-]*\b/gi)||[])
+     ].map(x=>x.replace(/\s+/g,"").toUpperCase()))];
+ if(!attn&&company)attn=company;
+ // IMPORTANT: persist the actual extracted PDF text and positioned tokens.
+ return {id:++seq,file,pages:pdf.numPages,type,company,attn,date,inv,invoiceRefs,account,amount,listingRows,listingGrandTotal,text,lines,posItems};
+}
+async function load(fs){
+ if(!fs.length)return;
+ isLoading=true; loadTotal=fs.length; loadDone=0;
+ const auditBox=$("#audit");
+ if(auditBox){auditBox.innerHTML="";auditBox.closest(".card")?.classList.add("hidden");}
+ $("#status").textContent=`正在智能读取 0 / ${loadTotal} 个 PDF…`;
+
+ for(const f of fs){
+   try{
+     let d=await readPdf(f);
+     docs.push(d);
+     if(d.company)selected.add(d.company);
+   }catch(e){
+     docs.push({
+       id:++seq,file:f,pages:"?",type:"ERROR",company:"",attn:"",date:"",inv:"",
+       invoiceRefs:[],account:"",amount:null,listingRows:[],listingGrandTotal:null,
+       text:"",lines:[],posItems:[],
+       errorMessage:(e&&e.message)?e.message:String(e||"无法读取 PDF")
+     });
+   }
+   loadDone++;
+   $("#status").textContent=`正在智能读取 ${loadDone} / ${loadTotal} 个 PDF…`;
+   render();
+ }
+ isLoading=false;
+ $("#status").textContent=`读取完成：本次 ${loadTotal} 个 PDF；目前共 ${docs.length} 个 PDF`;
+ render();
+}
+function esc(s){return String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function reconcileCustomers(){
+ // Customer Account is the strongest identity key for these SQL Account documents.
+ let groups={};
+ docs.forEach(d=>{if(d.account)(groups[d.account]??=[]).push(d)});
+ Object.values(groups).forEach(g=>{
+   // Prefer the longest complete company name seen across Invoice/Listing.
+   let names=g.map(d=>d.company).filter(Boolean).sort((a,b)=>b.length-a.length);
+   if(!names.length)return;
+   let canonical=names[0];
+   // If a shorter version lacks a wrapped registration suffix, longest version wins.
+   g.forEach(d=>{
+     let old=d.company;
+     d.company=canonical;
+     if(!d.attn || d.attn===old || /FRESH HARVEST/i.test(d.attn)) d.attn=canonical;
+   });
+ });
+}
+
+function monthOf(d){
+ if(d.date && /^\d{4}-\d{2}/.test(d.date)) return d.date.slice(0,7);
+ return "";
+}
+function renderMonths(){
+ let ms=[...new Set(docs.filter(d=>d.type==="INVOICE").map(monthOf).filter(Boolean))].sort();
+ ms.forEach(m=>selectedMonths.add(m));
+ $("#months").innerHTML=ms.length?ms.map(m=>`<label class="filterLabel"><input type="checkbox" ${selectedMonths.has(m)?"checked":""} onchange="toggleMonth(this,'${m}')">${m}</label>`).join(""):'<span class="muted">尚未识别到月份</span>';
+}
+window.toggleMonth=(e,m)=>{e.checked?selectedMonths.add(m):selectedMonths.delete(m);render()}
+function renderCompanies(){let cs=[...new Set(docs.map(d=>d.company).filter(Boolean))].sort();
+ $("#companies").innerHTML=cs.length?cs.map(c=>`<label class="company"><input type="checkbox" ${selected.has(c)?"checked":""} onchange="toggle(this,'${encodeURIComponent(c)}')">${esc(c)}</label>`).join(""):'<span class="muted">尚未识别到公司</span>'}
+window.toggle=(e,c)=>{c=decodeURIComponent(c);e.checked?selected.add(c):selected.delete(c)}
+function duplicateIds(){
+ let map={}; docs.filter(d=>d.type==="INVOICE"&&/^IV(?:\d|N[- ]?\d)/i.test(d.inv)).forEach(d=>{
+   let owner=d.account||d.company; let k=(owner+"|"+d.inv).toUpperCase();(map[k]??=[]).push(d.id)
+ });
+ return new Set(Object.values(map).filter(a=>a.length>1).flat());
+}
+function render(){reconcileCustomers();renderCompanies();renderMonths();let dups=duplicateIds();$("#rows").innerHTML=docs.map((d,i)=>`<tr class="${dups.has(d.id)?"dup":d.type==="LISTING"?"listing":(!d.company||(!d.date&&d.type==="INVOICE")?"warn":"")}">
+<td>${i+1}</td><td><span class="pill">${d.type}</span></td><td>${esc(d.account||"-")}</td>
+<td><input value="${esc(d.company)}" onchange="edit(${d.id},'company',this.value)"></td>
+<td><input value="${esc(d.attn)}" onchange="edit(${d.id},'attn',this.value)"></td>
+<td><input type="date" value="${esc(d.date)}" onchange="edit(${d.id},'date',this.value)"></td>
+<td><input value="${esc(d.inv)}" onchange="edit(${d.id},'inv',this.value)"></td><td>${d.type==="INVOICE"?rm(d.amount):(d.type==="LISTING"?rm(d.listingGrandTotal):"-")}</td><td>${d.pages}</td><td>${esc(d.file.name)}</td>
+<td>${d.type==="ERROR"?`⚠️ 读取失败：${esc(d.errorMessage||"无法读取 PDF")}`:dups.has(d.id)?"⚠️ 重复 Invoice":d.company&&(d.type==="LISTING"||d.date)?"✓":"待确认"}</td></tr>`).join("");
+ audit();
+ let auditBox=$("#audit");
+ if(auditBox){
+   let auditCard=document.getElementById("auditCard") || auditBox.closest(".card");
+   // Only red/error items count as a problem. Positive text such as
+   // "没有发现重复" contains the word 重复, so text keyword matching must not be used.
+   let hasProblem=!!auditBox.querySelector(".bad");
+   if(auditCard) auditCard.style.display=hasProblem?"":"none";
+ }
+ renderMonthlyReport(); companySummary(); preview();
+}
+window.edit=(id,k,v)=>{let d=docs.find(x=>x.id===id),old=d.company;d[k]=v;if(k==="company"){if(!d.attn||d.attn===old)d.attn=v;if(v)selected.add(v)}render()}
+$("#all").onclick=()=>{docs.forEach(d=>d.company&&selected.add(d.company));render()};$("#none").onclick=()=>{selected.clear();render()};
+$("#allMonths").onclick=()=>{docs.filter(d=>d.type==="INVOICE").forEach(d=>{let m=monthOf(d);if(m)selectedMonths.add(m)});render()};
+$("#noneMonths").onclick=()=>{selectedMonths.clear();render()};
+
+
+function selectedDocs(){
+ let chosenInvoices=docs.filter(d=>selected.has(d.company)&&d.type==="INVOICE"&&selectedMonths.has(monthOf(d)));
+ let activeCompanies=new Set(chosenInvoices.map(d=>d.company));
+ return docs.filter(d=>{
+   if(!selected.has(d.company))return false;
+   if(d.type==="INVOICE")return selectedMonths.has(monthOf(d));
+   if(d.type==="LISTING")return activeCompanies.has(d.company);
+   return activeCompanies.has(d.company);
+ });
+}
+
+function normalizeDateToken(v){
+ if(!v)return "";
+ let m=String(v).match(/\b(20\d{2})[-\/.](\d{1,2})[-\/.](\d{1,2})\b/);
+ if(m)return `${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`;
+ m=String(v).match(/\b(\d{1,2})[-\/.](\d{1,2})[-\/.](20\d{2})\b/);
+ if(m)return `${m[3]}-${String(+m[2]).padStart(2,"0")}-${String(+m[1]).padStart(2,"0")}`;
+ return "";
+}
+
+function listingRowsByPosition(listingDoc){
+ let items=listingDoc.posItems||[], rows=[];
+ if(!items.length)return rows;
+ let pages=[...new Set(items.map(i=>i.page))];
+ pages.forEach(pg=>{
+   let arr=items.filter(i=>i.page===pg&&String(i.text||"").trim());
+   // Group PDF tokens by visual baseline. 3.5pt tolerance handles minor font offsets.
+   let groups=[];
+   arr.sort((a,b)=>b.y-a.y||a.x-b.x).forEach(it=>{
+     let g=groups.find(r=>Math.abs(r.y-it.y)<=3.5);
+     if(!g){g={y:it.y,items:[]};groups.push(g)}
+     g.items.push(it);
+   });
+   groups.forEach(g=>{
+     g.items.sort((a,b)=>a.x-b.x);
+     let line=g.items.map(i=>i.text).join(" ").replace(/\s+/g," ").trim();
+     let inv=(line.match(/\bIV\d{4,}-\d{3,}\b/)||[])[0];
+     if(!inv)return;
+     let date=normalizeDateToken(line);
+     // Sometimes the date is one baseline immediately above/below due to PDF table extraction.
+     if(!date){
+       let near=groups.filter(h=>h!==g&&Math.abs(h.y-g.y)<=18)
+         .sort((a,b)=>Math.abs(a.y-g.y)-Math.abs(b.y-g.y));
+       for(const h of near){
+         let t=h.items.sort((a,b)=>a.x-b.x).map(i=>i.text).join(" ");
+         date=normalizeDateToken(t); if(date)break;
+       }
+     }
+     // Capture the last money-like value on the visual row when available.
+     let nums=[...line.matchAll(/(?:RM\s*)?([\d,]+\.\d{2})\b/gi)].map(m=>parseFloat(m[1].replace(/,/g,"")));
+     rows.push({inv,date,amount:nums.length?nums[nums.length-1]:null,page:pg,y:g.y,line});
+   });
+ });
+ // de-duplicate by invoice number
+ let m=new Map(); rows.forEach(r=>{if(!m.has(r.inv)||(!m.get(r.inv).date&&r.date))m.set(r.inv,r)});
+ return [...m.values()];
+}
+
+
+function standardSqlListingRecords(listingDoc){
+ let text=(listingDoc.text||"").replace(/\u00a0/g," ");
+ let out=[], seen=new Set();
+
+ // Actual Android Chrome/pdf.js extraction order observed:
+ // IV2609-0055
+ // 300-S0003
+ // 12/09/2026
+ // 1,447.33
+ // SEMBILAN MUDAH ENGINEERING...
+ let rx=/\b(IV\d{4,}-\d{3,})\s+(300-[A-Z0-9]+)\s+(\d{1,2}\/\d{1,2}\/20\d{2})\s+([\d,]+\.\d{2})\s+([\s\S]*?)(?=\s+IV\d{4,}-\d{3,}\b|\s+Grand\s+Total|\s+\d{1,3}(?:,\d{3})*\.\d{2}\s+Grand\s+Total|$)/gi;
+ let m;
+ while((m=rx.exec(text))){
+   let inv=m[1].toUpperCase(),
+       account=m[2].toUpperCase(),
+       date=normalizeDateToken(m[3]),
+       amount=parseFloat(m[4].replace(/,/g,"")),
+       company=clean(m[5]||"");
+   if(!seen.has(inv)){
+     seen.add(inv);
+     out.push({inv,account,date,amount,company});
+   }
+ }
+
+ // Simpler authoritative fallback: the first four fields alone are enough
+ // for missing-invoice/date/amount reconciliation.
+ if(!out.length){
+   let rx2=/\b(IV\d{4,}-\d{3,})\s+(300-[A-Z0-9]+)\s+(\d{1,2}\/\d{1,2}\/20\d{2})\s+([\d,]+\.\d{2})\b/gi;
+   while((m=rx2.exec(text))){
+     if(!seen.has(m[1])){
+       seen.add(m[1]);
+       out.push({
+         inv:m[1].toUpperCase(),
+         account:m[2].toUpperCase(),
+         date:normalizeDateToken(m[3]),
+         amount:parseFloat(m[4].replace(/,/g,""))
+       });
+     }
+   }
+ }
+ return out;
+}
+function listingRecords(listingDoc){
+ let text=listingDoc.text||"", pos=listingDoc.posItems||[], records=new Map();
+
+ function put(inv,date,amount,score){
+   if(!inv)return;
+   date=normalizeDateToken(date)||"";
+   amount=(typeof amount==="number"&&isFinite(amount))?amount:null;
+   let old=records.get(inv);
+   if(!old||score>(old.score||0)||
+      (score===(old.score||0)&&(!old.date&&date))||
+      (score===(old.score||0)&&old.amount==null&&amount!=null)){
+     records.set(inv,{inv,date,amount,score});
+   }
+ }
+
+ // 0. Standard SQL Account Customer Invoice Listing row parser.
+ standardSqlListingRecords(listingDoc).forEach(r=>put(r.inv,r.date,r.amount,100));
+
+ // 1. Existing parser output.
+ (listingDoc.listingRows||[]).forEach(r=>put(r.inv,r.date,r.amount,50));
+
+ // 2. Geometric visual rows from PDF coordinates.
+ listingRowsByPosition(listingDoc).forEach(r=>put(r.inv,r.date,r.amount,90));
+
+ // 3. Reconstruct logical rows using page + Y coordinates, then also inspect
+ // neighboring baselines because PDF table cells can have slightly different Y.
+ if(pos.length){
+   let pages=[...new Set(pos.map(x=>x.page))];
+   pages.forEach(pg=>{
+     let arr=pos.filter(x=>x.page===pg&&String(x.text||"").trim());
+     let invItems=arr.filter(x=>/\bIV\d{4,}-\d{3,}\b/.test(x.text));
+     invItems.forEach(iv=>{
+       let inv=(iv.text.match(/\bIV\d{4,}-\d{3,}\b/)||[])[0];
+       let band=arr.filter(x=>Math.abs(x.y-iv.y)<=22)
+                   .sort((a,b)=>Math.abs(a.y-iv.y)-Math.abs(b.y-iv.y)||a.x-b.x);
+       let bandText=band.map(x=>x.text).join(" ");
+       let date=normalizeDateToken(bandText);
+       let nums=[...bandText.matchAll(/(?:RM\s*)?([\d,]+\.\d{2})\b/gi)]
+         .map(m=>parseFloat(m[1].replace(/,/g,"")));
+       put(inv,date,nums.length?nums[nums.length-1]:null,80);
+     });
+   });
+ }
+
+ // 4. Flattened-text row/chunk parser. Handles extracted tables whose columns
+ // are emitted in a strange order but still preserve separators/newlines.
+ let refs=listingDoc.invoiceRefs||[...text.matchAll(/\bIV\d{4,}-\d{3,}\b/g)].map(m=>m[0]);
+ refs.forEach(inv=>{
+   let i=text.indexOf(inv);
+   if(i<0)return;
+   let chunk=text.slice(Math.max(0,i-260),Math.min(text.length,i+300));
+   let date=normalizeDateToken(chunk);
+   let nums=[...chunk.matchAll(/(?:RM\s*)?([\d,]+\.\d{2})\b/gi)]
+      .map(m=>parseFloat(m[1].replace(/,/g,"")));
+   put(inv,date,nums.length?nums[0]:null,30);
+ });
+
+ // 5. Column-oriented PDFs: pair invoice sequence with date sequence only
+ // when counts align. This is safer than guessing individual dates.
+ let allRefs=[...text.matchAll(/\bIV\d{4,}-\d{3,}\b/g)].map(m=>m[0]);
+ let uniqueRefs=[]; allRefs.forEach(x=>{if(!uniqueRefs.includes(x))uniqueRefs.push(x)});
+ let allDates=[...text.matchAll(/\b(?:20\d{2}[-\/.]\d{1,2}[-\/.]\d{1,2}|\d{1,2}[-\/.]\d{1,2}[-\/.]20\d{2})\b/g)]
+   .map(m=>normalizeDateToken(m[0])).filter(Boolean);
+ let uniqueDates=[]; allDates.forEach(x=>{if(!uniqueDates.includes(x))uniqueDates.push(x)});
+ if(uniqueRefs.length && uniqueRefs.length===uniqueDates.length){
+   uniqueRefs.forEach((inv,i)=>put(inv,uniqueDates[i],null,40));
+ }
+
+ return [...records.values()].map(({score,...r})=>r);
+}
+function listingDateMap(listingDoc){
+ let map=new Map(), text=listingDoc.text||"";
+
+ // Authoritative Listing records: each invoice is bound to its own date/amount.
+ listingRecords(listingDoc).forEach(r=>{if(r.inv&&r.date)map.set(r.inv,r.date)});
+
+ // Visual PDF table rows are fallback.
+ listingRowsByPosition(listingDoc).forEach(r=>{if(r.inv&&r.date)map.set(r.inv,r.date)});
+
+ // Existing structured rows are next.
+ (listingDoc.listingRows||[]).forEach(r=>{
+   let d=normalizeDateToken(r.date);
+   if(r.inv&&d&&!map.has(r.inv))map.set(r.inv,d);
+ });
+
+ let refs=listingDoc.invoiceRefs||[...text.matchAll(/\bIV\d{4,}-\d{3,}\b/g)].map(x=>x[0]);
+
+ // Same/nearby row matching in both directions.
+ refs.forEach(no=>{
+   if(map.has(no))return;
+   let idx=text.indexOf(no);
+   if(idx<0)return;
+   let left=text.slice(Math.max(0,idx-220),idx);
+   let right=text.slice(idx,Math.min(text.length,idx+220));
+   let d=normalizeDateToken(right.slice(0,140));
+   if(!d){
+     let all=[...left.matchAll(/(?:20\d{2}[-\/.]\d{1,2}[-\/.]\d{1,2}|\d{1,2}[-\/.]\d{1,2}[-\/.]20\d{2})/g)];
+     if(all.length)d=normalizeDateToken(all[all.length-1][0]);
+   }
+   if(d)map.set(no,d);
+ });
+
+ // PDF.js sometimes extracts Listing columns separately. If invoice refs and dates
+ // appear as ordered columns, pair them by their Listing order.
+ let dates=[...text.matchAll(/\b(?:20\d{2}[-\/.]\d{1,2}[-\/.]\d{1,2}|\d{1,2}[-\/.]\d{1,2}[-\/.]20\d{2})\b/g)]
+   .map(x=>normalizeDateToken(x[0])).filter(Boolean);
+ let uniqDates=[];
+ dates.forEach(d=>{if(!uniqDates.includes(d))uniqDates.push(d)});
+ if(refs.length && uniqDates.length>=refs.length){
+   refs.forEach((no,i)=>{if(!map.has(no)&&uniqDates[i])map.set(no,uniqDates[i])});
+ }
+
+ // Final fallback: invoice numbers IVYYMM-xxxx encode the invoice month.
+ // If exact day still cannot be extracted, do not invent a day.
+ return map;
+}
+function listingDateForInvoice(listingDoc, invNo){
+ return listingDateMap(listingDoc).get(invNo)||"";
+}
+function invoiceMonthFallback(invNo){
+ let m=String(invNo||"").match(/^IV(\d{2})(\d{2})-/i);
+ if(!m)return "";
+ let mo=parseInt(m[2],10);
+ return mo>=1&&mo<=12?`${mo}月（几号未识别）`:"";
+}
+function cnMonthDay(dt){
+ if(!dt)return "";
+ let m=dt.match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+ return m?`${parseInt(m[2],10)}月${parseInt(m[3],10)}日`:dt;
+}
+function audit(){
+ const box=$("#audit");
+ if(isLoading){
+   if(box){box.innerHTML="";box.closest(".card")?.classList.add("hidden");}
+   return;
+ }
+ if(!box)return;
+ let issues=[];
+ docs.filter(d=>d.type==="ERROR").forEach(d=>{
+   issues.push(`<div class="bad">⚠️ <b>PDF 读取失败</b><br>文件：${esc(d.file&&d.file.name?d.file.name:"未知文件")}<br>原因：${esc(d.errorMessage||"无法读取 PDF")}</div>`);
+ });
+ const invoices=docs.filter(d=>d.type==="INVOICE");
+ const listings=docs.filter(d=>d.type==="LISTING");
+
+ // Duplicate invoice numbers, including across an accidentally mixed upload batch.
+ let byInv={};
+ invoices.forEach(d=>{
+   let k=(d.inv||"").toUpperCase();
+   if(k)(byInv[k]||(byInv[k]=[])).push(d);
+ });
+ Object.entries(byInv).forEach(([inv,arr])=>{
+   if(arr.length>1){
+     let companies=[...new Set(arr.map(x=>x.company||x.account||"未知公司"))].join(" / ");
+     issues.push(`<div class="bad">⚠️ <b>重复 Invoice</b><br>公司：${esc(companies)}<br>Invoice：${esc(inv)}<br>共上传：${arr.length} 份</div>`);
+   }
+ });
+
+ listings.forEach(l=>{
+   let recs=listingRecords(l);
+   let refs=recs.length?recs.map(r=>r.inv):listingInvoiceRefs(l.text||"");
+   let company=l.company||l.account||"未知公司";
+   let related=invoices.filter(d=>{
+     if(l.account&&d.account)return d.account===l.account;
+     return normalizeCompanyName(d.company||"")===normalizeCompanyName(l.company||"");
+   });
+   let invMap={};
+   related.forEach(d=>{if(d.inv)invMap[d.inv.toUpperCase()]=d});
+
+   // Missing invoices.
+   refs.forEach(ref=>{
+     let key=ref.toUpperCase();
+     if(!invMap[key]){
+       let r=recs.find(x=>(x.inv||"").toUpperCase()===key);
+       let dt=r&&r.date?dateCN(r.date):"";
+       issues.push(`<div class="bad">⚠️ <b>缺少 Invoice</b><br>公司：${esc(company)}<br>缺少：${esc(key)}${dt?`<br>日期：${esc(dt)}`:""}</div>`);
+     }
+   });
+
+   // Invoice uploaded but not present in that company's Listing.
+   let refSet=new Set(refs.map(x=>x.toUpperCase()));
+   related.forEach(d=>{
+     if(d.inv && refs.length && !refSet.has(d.inv.toUpperCase())){
+       issues.push(`<div class="bad">⚠️ <b>Listing 找不到 Invoice</b><br>公司：${esc(company)}<br>Invoice：${esc(d.inv)}${d.date?`<br>Invoice 日期：${esc(dateCN(d.date))}`:""}</div>`);
+     }
+   });
+
+   // Date / amount / account checks against Listing.
+   recs.forEach(r=>{
+     let d=invMap[(r.inv||"").toUpperCase()];
+     if(!d)return;
+
+     if(r.date && d.date && r.date!==d.date){
+       issues.push(`<div class="bad">⚠️ <b>日期不一致</b><br>公司：${esc(company)}<br>Invoice：${esc(r.inv)}<br>Invoice：${esc(dateCN(d.date))}<br>Listing：${esc(dateCN(r.date))}</div>`);
+     }
+     if(Number.isFinite(r.amount)&&Number.isFinite(d.amount)&&Math.abs(r.amount-d.amount)>0.009){
+       issues.push(`<div class="bad">⚠️ <b>金额不一致</b><br>公司：${esc(company)}<br>Invoice：${esc(r.inv)}<br>Invoice：RM${money(d.amount)}<br>Listing：RM${money(r.amount)}</div>`);
+     }
+     if(l.account && d.account && l.account!==d.account){
+       issues.push(`<div class="bad">⚠️ <b>Customer Account 不一致</b><br>公司：${esc(company)}<br>Invoice：${esc(r.inv)}<br>Invoice：${esc(d.account)}<br>Listing：${esc(l.account)}</div>`);
+     }
+   });
+
+   // Grand total check only when all Listing invoices for this company are present.
+   let missing=refs.filter(x=>!invMap[x.toUpperCase()]);
+   if(!missing.length && Number.isFinite(l.listingGrandTotal)){
+     let uploadedTotal=refs.reduce((sum,ref)=>{
+       let d=invMap[ref.toUpperCase()];
+       return sum+(d&&Number.isFinite(d.amount)?d.amount:0);
+     },0);
+     if(Math.abs(uploadedTotal-l.listingGrandTotal)>0.009){
+       issues.push(`<div class="bad">⚠️ <b>总金额不一致</b><br>公司：${esc(company)}<br>Invoice 合计：RM${money(uploadedTotal)}<br>Listing Grand Total：RM${money(l.listingGrandTotal)}</div>`);
+     }
+   }
+ });
+
+ // Listing missing for an invoice company/account.
+ let listingKeys=new Set(listings.map(l=>l.account||normalizeCompanyName(l.company||"")).filter(Boolean));
+ let groups={};
+ invoices.forEach(d=>{
+   let k=d.account||normalizeCompanyName(d.company||"");
+   if(k)(groups[k]||(groups[k]=[])).push(d);
+ });
+ Object.entries(groups).forEach(([k,arr])=>{
+   if(!listingKeys.has(k)){
+     let company=arr[0].company||arr[0].account||"未知公司";
+     issues.push(`<div class="bad">⚠️ <b>缺少 Listing</b><br>公司：${esc(company)}<br>已上传 Invoice：${arr.length} 份</div>`);
+   }
+ });
+
+ if(issues.length){
+   box.innerHTML=`<h2>自动检查</h2>${issues.join("")}`;
+   box.closest(".card")?.classList.remove("hidden");
+ }else{
+   box.innerHTML="";
+   box.closest(".card")?.classList.add("hidden");
+ }
+}function monthCN(m){
+ if(!m)return "未识别月份";
+ let [y,mo]=m.split("-");
+ return `${parseInt(mo,10)}月`;
+}
+function monthlyReportData(){
+ let invs=docs.filter(d=>d.type==="INVOICE"&&selected.has(d.company)&&selectedMonths.has(monthOf(d)));
+ let result={};
+ invs.forEach(d=>{
+   let c=d.company||"未识别公司", m=monthOf(d)||"未识别月份", a=d.attn||d.company||"未分类";
+   result[c]??={}; result[c][m]??={};
+   result[c][m][a]=(result[c][m][a]||0)+(d.amount||0);
+ });
+ return result;
+}
+function monthlyReportText(){
+ let data=monthlyReportData(), blocks=[];
+ Object.keys(data).sort().forEach(c=>{
+   Object.keys(data[c]).sort().forEach(m=>{
+     let rows=data[c][m], total=Object.values(rows).reduce((a,b)=>a+b,0);
+     let lines=[c,"",monthCN(m),""];
+     Object.entries(rows).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([attn,amt])=>lines.push(`${attn} - ${rm(amt)}`));
+     lines.push("",`合计：${rm(total)}`);
+     blocks.push(lines.join("\n"));
+   });
+ });
+ return blocks.join("\n\n--------------------\n\n");
+}
+function renderMonthlyReport(){
+ let box=$("#monthlyReport"), data=monthlyReportData(), html=[];
+ Object.keys(data).sort().forEach(c=>{
+   Object.keys(data[c]).sort().forEach(m=>{
+     let rows=data[c][m], total=Object.values(rows).reduce((a,b)=>a+b,0);
+     html.push(`<div class="summaryCard" style="margin-bottom:12px"><b>${esc(c)}</b><div style="font-size:17px;font-weight:700;margin:8px 0">${monthCN(m)}</div>`);
+     Object.entries(rows).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([attn,amt])=>{
+       html.push(`<div style="display:flex;justify-content:space-between;gap:15px;padding:5px 0"><span>${esc(attn)}</span><b>${rm(amt)}</b></div>`);
+     });
+     html.push(`<div style="border-top:1px solid #bbb;margin-top:7px;padding-top:8px;display:flex;justify-content:space-between"><b>合计</b><b>${rm(total)}</b></div></div>`);
+   });
+ });
+ box.innerHTML=html.length?html.join(""):'<span class="muted">选择公司和月份后显示汇报。</span>';
+}
+function companySummary(){
+ let box=$("#companySummary");
+ if(box){let card=box.closest(".card");if(card)card.style.display="none";box.innerHTML="";}
+}
+function preview(){
+ let list=selectedDocs().slice().sort(sorter), box=$("#preview");
+ if(!list.length){box.innerHTML='<span class="muted">请先选择公司。</span>';return}
+ let html="",lastC="",lastA="";
+ list.forEach((d,i)=>{
+   if(d.company!==lastC){if(lastC)html+="</div>";html+=`<div class="previewGroup"><b>${esc(d.company)}</b>`;lastC=d.company;lastA=""}
+   if(d.type==="LISTING"){html+=`<div class="previewItem">📄 ${i+1}. STATEMENT LISTING — 公司最后</div>`;return}
+   if(d.attn!==lastA){html+=`<div class="previewItem"><b>ATTN：${esc(d.attn||d.company)}</b></div>`;lastA=d.attn}
+   html+=`<div class="previewItem">${i+1}. ${esc(d.date||"无日期")} · ${esc(d.inv||"无 Invoice No.")}</div>`
+ });
+ if(lastC)html+="</div>";box.innerHTML=html;
+}
+$("#refreshPreview").onclick=()=>{
+ audit();
+ let auditBox=$("#audit");
+ if(auditBox){
+   let auditCard=document.getElementById("auditCard") || auditBox.closest(".card");
+   let hasProblem=!!auditBox.querySelector(".bad");
+   if(auditCard) auditCard.style.display=hasProblem?"":"none";
+ }
+ preview()
+};
+
+
+$("#copyMonthlyReport").onclick=async()=>{
+ let t=monthlyReportText();
+ if(!t)return alert("目前没有可以汇报的 Invoice 金额");
+ try{await navigator.clipboard.writeText(t);$("#status").textContent="月度金额汇报已复制，可以直接粘贴到 WhatsApp。";}
+ catch(e){
+   let ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand("copy");ta.remove();
+   $("#status").textContent="月度金额汇报已复制，可以直接粘贴到 WhatsApp。";
+ }
+};
+
+function sorter(a,b){
+ let c=(a.company||"").localeCompare(b.company||"");
+ if(c)return c;
+ // Listing always after all normal documents belonging to the same company.
+ let ta=a.type==="LISTING"?1:0,tb=b.type==="LISTING"?1:0;if(ta!==tb)return ta-tb;
+ if(ta&&tb)return (a.date||"9999").localeCompare(b.date||"9999")||a.file.name.localeCompare(b.file.name);
+ let at=(a.attn||a.company||"").localeCompare(b.attn||b.company||"");if(at)return at;
+ return (a.date||"9999").localeCompare(b.date||"9999")||(a.inv||"").localeCompare(b.inv||"");
+}
+async function build(list){
+ let out=await PDFLib.PDFDocument.create();
+ // Simple ASCII-safe report page; source PDFs remain unchanged.
+ let page=out.addPage([595.28,841.89]), font=await out.embedFont(PDFLib.StandardFonts.Helvetica), bold=await out.embedFont(PDFLib.StandardFonts.HelveticaBold);
+ let y=790; page.drawText("SMART PDF MERGE REPORT",{x:48,y,size:18,font:bold}); y-=30;
+ let companies=[...new Set(list.map(d=>d.company).filter(Boolean))];
+ page.drawText("Companies: "+companies.length,{x:48,y,size:11,font}); y-=18;
+ page.drawText("PDF files: "+list.length,{x:48,y,size:11,font}); y-=18;
+ page.drawText("Months: "+[...selectedMonths].sort().join(", "),{x:48,y,size:11,font}); y-=28;
+ for(const c of companies){
+   let ds=list.filter(d=>d.company===c), invs=ds.filter(d=>d.type==="INVOICE"), listings=ds.filter(d=>d.type==="LISTING");
+   let label=c.replace(/[^\x20-\x7E]/g,"").slice(0,65);
+   page.drawText(label,{x:48,y,size:10,font:bold});y-=15;
+   page.drawText(`Invoices: ${invs.length}   Listings: ${listings.length}`,{x:60,y,size:9,font});y-=20;
+   if(y<80){page=out.addPage([595.28,841.89]);y=790}
+ }
+ for(const d of list){let src=await PDFLib.PDFDocument.load(await d.file.arrayBuffer());let ps=await out.copyPages(src,src.getPageIndices());ps.forEach(p=>out.addPage(p))}
+ return out.save()
+}
+function dl(bytes){let a=document.createElement("a");a.href=URL.createObjectURL(new Blob([bytes],{type:"application/pdf"}));a.download="智能分类合并.pdf";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),3000)}
+$("#merge").onclick=async()=>{let list=selectedDocs();if(!list.length)return alert("请先选择公司和月份");
+ list.forEach(d=>{if(!d.attn)d.attn=d.company});
+ // Prevent accidental double insertion: keep first occurrence of same company + Invoice No.
+ let seen=new Set(), skipped=[];
+ list=list.filter(d=>{if(d.type!=="INVOICE"||!/^IV(?:\d|N[- ]?\d)/i.test(d.inv))return true;
+ let owner=d.account||d.company;let k=(owner+"|"+d.inv).toUpperCase();
+ if(seen.has(k)){skipped.push(d);return false}seen.add(k);return true});
+ list.sort(sorter);$("#status").textContent=`正在按公司 → ATTN → 日期 → Listing 合并 ${list.length} 个文件…`;
+ try{dl(await build(list));$("#status").textContent=`完成：${list.length} 个 PDF 已合并成 1 个 PDF${skipped.length?"；已自动跳过 "+skipped.length+" 个重复 Invoice":""}`;}catch(e){alert("合并失败："+e.message)}};
+</script></body></html>
